@@ -102,4 +102,6 @@ node tools/mcp-test.mjs     # 顺带验证 rw_playbook / rw_panel_map
 
 ## 许可证
 
-未指定。仓库里不含游戏本体与游戏资源；使用时请遵守 Rusted Warfare 自身的使用条款。
+[MIT](LICENSE) © 2026 blackeeg
+
+仓库里不含游戏本体与游戏资源；使用时请遵守 Rusted Warfare 自身的使用条款。
