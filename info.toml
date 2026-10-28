@@ -1,0 +1,13 @@
+name = "probe"
+id = "probe"
+version = "0.1.0"
+author = "dsh"
+displayName = "RWPP 只读探针"
+icon = ""
+description = "只读探针：证明扩展被加载，并在 127.0.0.1 暴露战局快照。"
+hasResource = false
+hasInjectInfo = false
+minGameVersion = "v1.6.2"
+dependencies = []
+mainClass = "probe.ProbeLauncher"
+supportedPlatforms = ["desktop"]

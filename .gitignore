@@ -1,0 +1,23 @@
+# 构建产物
+build/
+out/
+*.class
+probe.jar
+
+# 探针运行数据
+records/
+state.json
+units.json
+u1.json
+u2.json
+
+# 截图与临时文件
+tools/shots/
+*.png
+*.jpg
+
+# 本地环境
+node_modules/
+.vscode/
+.DS_Store
+Thumbs.db
