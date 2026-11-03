@@ -125,7 +125,7 @@ const TOOLS = [
   },
   {
     name: 'rw_act',
-    description: '对游戏执行一个动作。do 可选：move(x,y) / select(关键字) / credits(数值) / spawn(类型,x,y,数量，仅房主) / mission(关卡名) / startmatch / unpause / use(面板动作名，目前是空实现)。',
+    description: '对游戏执行一个动作。do 可选：move(x,y) / select(关键字) / credits(数值) / spawn(类型,x,y,数量，仅房主) / mission(关卡名) / startmatch / unpause / use(空实现) / build2(菜单序号,x,y 原生建造，需先 rw_buildmenu 缓存类型) / enqueue(面板动作名，建筑侧排产，含「升级 - T2」) / moveall(x,y 整队移动，走 Debug.moveAllUnitsOnTeam，带寻路)。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -133,6 +133,17 @@ const TOOLS = [
         v: { type: 'string' },
       },
       required: ['do'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'rw_buildmenu',
+    description: '原生枚举建造菜单（units.e.b.a(list,tech)）：每项含 index/name/desc/price，不依赖分辨率和面板坐标。序号可交给 rw_act do=build2（build2 读最近一次本工具的缓存类型）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tech: { type: 'number' },
+      },
       additionalProperties: false,
     },
   },
@@ -254,6 +265,14 @@ async function callTool(name, args = {}) {
       const r = await probe(q, 10000)
       if (!r.ok) return errorResult('探针没应答：' + r.error)
       return textResult(r.data)
+    }
+    case 'rw_buildmenu': {
+      const tech = Number.isFinite(Number(args.tech)) ? Number(args.tech) : 0
+      const r = await probe(`/buildmenu?tech=${tech}`, 8000)
+      if (!r.ok) return errorResult('探针没应答：' + r.error)
+      const data = r.data || {}
+      if (data.ok === false) return errorResult(String(data.error || '读取菜单失败'))
+      return textResult(data)
     }
     case 'rw_records_tail': {
       const n = Math.max(1, Math.min(500, Number(args.n) || 40))

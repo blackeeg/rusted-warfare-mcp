@@ -40,7 +40,7 @@ import java.util.Map;
 public final class ProbeLauncher extends ExtensionLauncher {
 
     private static final int DEFAULT_PORT = 17999;
-    private static final String BUILD_TAG = "2026-10-28-panel";
+    private static final String BUILD_TAG = "2026-11-03-native";
     private static final long SAMPLE_MS = 200;
     private static final long HEARTBEAT_MS = 5000;
 
@@ -541,6 +541,8 @@ public final class ProbeLauncher extends ExtensionLauncher {
                     body = json(missionList());
                 } else if (path.equals("/panel")) {
                     body = json(panelInfo());
+                } else if (path.equals("/buildmenu")) {
+                    body = json(buildMenuList(intParam(query, "tech", 0)));
                 } else if (path.equals("/act")) {
                     body = json(runAction(firstParam(query, "do"), firstParam(query, "v")));
                 } else if (path.equals("/tail")) {
@@ -629,6 +631,13 @@ public final class ProbeLauncher extends ExtensionLauncher {
                 item.put("x", Math.round(u.getX()));
                 item.put("y", Math.round(u.getY()));
                 try { item.put("hp", Math.round(u.getHealth())); } catch (Throwable ignored) { }
+                try {
+                    Object internal = internalUnitOf(u);
+                    if (internal != null) {
+                        Object eh = fieldValue(internal, "eh");
+                        if (eh instanceof Number) item.put("eh", ((Number) eh).longValue());
+                    }
+                } catch (Throwable ignored) { }
                 boolean isMine = myTeam != null && team == myTeam;
                 if (!isMine && skipNeutral && team < 0) continue;
                 if (isMine) {
@@ -759,6 +768,81 @@ public final class ProbeLauncher extends ExtensionLauncher {
         } catch (Throwable ignored) {
         }
     }
+
+    /** 沿父类链找方法（getMethods 拿不到包私有父类的公开方法）。 */
+    private static java.lang.reflect.Method findInHierarchy(Class<?> start, String name, Class<?>... params) {
+        for (Class<?> k = start; k != null && !k.equals(Object.class); k = k.getSuperclass()) {
+            try {
+                java.lang.reflect.Method m = k.getDeclaredMethod(name, params);
+                m.setAccessible(true);
+                return m;
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        return null;
+    }
+
+    /** 原生建造菜单枚举：units.e.b.a(list, tech)，每项 units.a.v（b()名称 c()价格 i()类型）。 */
+    private static Map<String, Object> buildMenuList(int tech) {
+        io.github.rwpp.game.Game game = gameOrNull();
+        if (game == null) return mapOf("ok", false, "error", "拿不到 Game 实例");
+        try {
+            Class<?> builderClass = Class.forName("com.corrodinggames.rts.game.units.e.b");
+            java.lang.reflect.Method gen = null;
+            for (java.lang.reflect.Method m : builderClass.getDeclaredMethods()) {
+                Class<?>[] ps = m.getParameterTypes();
+                if (m.getName().equals("a") && ps.length == 2 && List.class.isAssignableFrom(ps[0]) && ps[1] == int.class) {
+                    gen = m;
+                    break;
+                }
+            }
+            if (gen == null) return mapOf("ok", false, "error", "找不到 units.e.b.a(List,int) 菜单生成器");
+            gen.setAccessible(true);
+            List<Object> list = new ArrayList<>();
+            gen.invoke(null, list, tech);
+            List<Object> out = new ArrayList<>();
+            int idx = 0;
+            for (Object a : list) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("index", idx++);
+                try { item.put("name", findZeroArg(a.getClass(), "b").invoke(a)); } catch (Throwable ignored) { }
+                try { item.put("desc", findZeroArg(a.getClass(), "a").invoke(a)); } catch (Throwable ignored) { }
+                try { item.put("price", findZeroArg(a.getClass(), "c").invoke(a)); } catch (Throwable ignored) { }
+                try {
+                    Object type = findZeroArg(a.getClass(), "i").invoke(a);
+                    if (type != null) {
+                        item.put("typeId", String.valueOf(type.getClass().getName()));
+                        try { item.put("typeName", findZeroArg(type.getClass(), "aQ").invoke(type)); } catch (Throwable ignored) { }
+                        item.put("_type", type);
+                    }
+                } catch (Throwable ignored) { }
+                out.add(item);
+            }
+            // 类型对象不能序列化，摘出来放缓存供 /act build2 用
+            synchronized (MENU_CACHE) {
+                MENU_CACHE.clear();
+                int i = 0;
+                for (Object a : list) {
+                    try {
+                        Object type = findZeroArg(a.getClass(), "i").invoke(a);
+                        if (type != null) MENU_CACHE.put(i, type);
+                    } catch (Throwable ignored) { }
+                    i++;
+                }
+            }
+            for (Object o : out) {
+                Map<String, Object> item = (Map<String, Object>) o;
+                Object t = item.remove("_type");
+                if (t != null) item.put("typeClass", t.getClass().getSimpleName());
+            }
+            return mapOf("ok", true, "tech", tech, "count", out.size(), "items", out);
+        } catch (Throwable t) {
+            return mapOf("ok", false, "error", String.valueOf(t));
+        }
+    }
+
+    private static final java.util.concurrent.ConcurrentHashMap<Integer, Object> MENU_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     /** 选中单位的面板动作列表（RWPP/游戏右侧面板的内容）。 */
     private static Map<String, Object> panelInfo() {
@@ -1253,6 +1337,129 @@ public final class ProbeLauncher extends ExtensionLauncher {
                         detail[0] = "已执行面板动作：" + pickedLabel;
                     } catch (Throwable t) {
                         detail[0] = "执行失败：" + t;
+                    }
+                } else if ("build2".equals(action)) {
+                    // 原生建造配方：v = 菜单序号,x,y（先调 /buildmenu 缓存类型）
+                    String[] parts = (value == null ? "" : value).split(",");
+                    int menuIdx = parts.length > 0 ? Integer.parseInt(parts[0].trim()) : -1;
+                    float wx = parts.length > 1 ? Float.parseFloat(parts[1].trim()) : 0f;
+                    float wy = parts.length > 2 ? Float.parseFloat(parts[2].trim()) : 0f;
+                    Object type = MENU_CACHE.get(menuIdx);
+                    if (type == null) { detail[0] = "菜单序号 " + menuIdx + " 没有缓存，先调 /buildmenu"; return; }
+                    io.github.rwpp.game.world.World w2 = game.getWorld();
+                    List<?> sel2 = w2 == null ? null : w2.getSelectedUnits();
+                    if (sel2 == null || sel2.isEmpty()) { detail[0] = "没有选中建造者"; return; }
+                    Object builder = internalUnitOf(sel2.get(0));
+                    if (builder == null) { detail[0] = "拿不到建造者内部对象"; return; }
+                    try {
+                        Class<?> asClass = Class.forName("com.corrodinggames.rts.game.units.as");
+                        Class<?> auClass = Class.forName("com.corrodinggames.rts.game.units.au");
+                        // act = builder.a(type, -1, false)
+                        java.lang.reflect.Method mA = findInHierarchy(builder.getClass(), "a", asClass, int.class, boolean.class);
+                        if (mA == null) { detail[0] = "找不到 a(as,int,boolean) 取动作方法"; return; }
+                        Object act = mA.invoke(builder, type, -1, false);
+                        if (act == null) { detail[0] = "取不到动作（类型名不对？）"; return; }
+                        // act.b(builder) 真·可用性判断
+                        java.lang.reflect.Method mb = findInHierarchy(act.getClass(), "b", builder.getClass());
+                        if (mb == null) {
+                            for (Class<?> k = act.getClass(); k != null && mb == null && !k.equals(Object.class); k = k.getSuperclass()) {
+                                for (java.lang.reflect.Method m : k.getDeclaredMethods()) {
+                                    Class<?>[] ps = m.getParameterTypes();
+                                    if (m.getName().equals("b") && ps.length == 1 && m.getReturnType() == boolean.class
+                                            && ps[0].isAssignableFrom(builder.getClass())) {
+                                        m.setAccessible(true); mb = m; break;
+                                    }
+                                }
+                            }
+                        }
+                        if (mb != null && !Boolean.TRUE.equals(mb.invoke(act, builder))) {
+                            detail[0] = "act.b(builder)=false：不可用（钱不够/没选中/被禁用）"; return;
+                        }
+                        // ctx = builder.ao(); ctx.b = type; ctx.n = false
+                        java.lang.reflect.Method ao = findInHierarchy(builder.getClass(), "ao");
+                        if (ao == null) { detail[0] = "找不到 ao() 命令池方法"; return; }
+                        Object ctx = ao.invoke(builder);
+                        setFieldValue(ctx, "b", type);
+                        setFieldValue(ctx, "n", false);
+                        // z = builder.a(ctx, type, -1, x, y)
+                        java.lang.reflect.Method mBuild = findInHierarchy(builder.getClass(), "a",
+                                auClass, asClass, int.class, float.class, float.class);
+                        if (mBuild == null) { detail[0] = "找不到 a(au,as,int,float,float)"; return; }
+                        Object z = mBuild.invoke(builder, ctx, type, -1, wx, wy);
+                        boolean zc = false;
+                        try { Object c = fieldValue(z, "c"); zc = Boolean.TRUE.equals(c); } catch (Throwable ignored) { }
+                        detail[0] = "原生建造已执行（z.c=" + zc + "，注意 z.c 不可靠，成败看资金与新对象）→ (" + wx + "," + wy + ")";
+                    } catch (Throwable t) {
+                        detail[0] = "建造失败：" + t;
+                    }
+                } else if ("enqueue".equals(action)) {
+                    // 建筑侧排产：v = 面板动作名（含「升级 - T2」）——building.a(a.s, boolean)
+                    io.github.rwpp.game.world.World w3 = game.getWorld();
+                    List<?> sel3 = w3 == null ? null : w3.getSelectedUnits();
+                    if (sel3 == null || sel3.isEmpty()) { detail[0] = "没有选中建筑"; return; }
+                    Object bld = internalUnitOf(sel3.get(0));
+                    if (bld == null) { detail[0] = "拿不到建筑内部对象"; return; }
+                    List<?> acts = actionListOf(bld);
+                    if (acts == null || acts.isEmpty()) { detail[0] = "读不到生产菜单"; return; }
+                    String needle = (value == null ? "" : value).trim();
+                    Object picked = null; String pickedLabel = "";
+                    for (Object a : acts) {
+                        String shortName = "", longName = "";
+                        try { Object v1 = findZeroArg(a.getClass(), "b").invoke(a); if (v1 instanceof String) shortName = (String) v1; } catch (Throwable ignored) { }
+                        try { Object v2 = findZeroArg(a.getClass(), "a").invoke(a); if (v2 instanceof String) longName = (String) v2; } catch (Throwable ignored) { }
+                        if (!needle.isEmpty() && (shortName.equals(needle) || longName.startsWith(needle) || shortName.contains(needle))) {
+                            picked = a; pickedLabel = shortName; break;
+                        }
+                    }
+                    if (picked == null) { detail[0] = "菜单里没有「" + needle + "」"; return; }
+                    try {
+                        java.lang.reflect.Method mEnq = null;
+                        for (java.lang.reflect.Method m : bld.getClass().getMethods()) {
+                            Class<?>[] ps = m.getParameterTypes();
+                            if (m.getName().equals("a") && ps.length == 2 && ps[1] == boolean.class
+                                    && m.getReturnType().getName().contains("units.d") && ps[0].isAssignableFrom(picked.getClass())) {
+                                mEnq = m; break;
+                            }
+                        }
+                        if (mEnq == null) {
+                            // 兜底：返回 void 的 a(a.s, boolean)
+                            for (java.lang.reflect.Method m : bld.getClass().getMethods()) {
+                                Class<?>[] ps = m.getParameterTypes();
+                                if (m.getName().equals("a") && ps.length == 2 && ps[1] == boolean.class
+                                        && ps[0].isAssignableFrom(picked.getClass())) { mEnq = m; break; }
+                            }
+                        }
+                        if (mEnq == null) { detail[0] = "找不到 building.a(action, boolean) 排产入口"; return; }
+                        Object job = mEnq.invoke(bld, picked, false);
+                        detail[0] = "排产「" + pickedLabel + "」已调用，返回 " + (job == null ? "null" : job.getClass().getSimpleName());
+                    } catch (Throwable t) {
+                        detail[0] = "排产失败：" + t;
+                    }
+                } else if ("moveall".equals(action)) {
+                    // Debug.moveAllUnitsOnTeam(team,x,y)：游戏自己的整队移动，带寻路
+                    String[] parts = (value == null ? "" : value).split(",");
+                    float mx = parts.length > 0 ? Float.parseFloat(parts[0].trim()) : 0f;
+                    float my = parts.length > 1 ? Float.parseFloat(parts[1].trim()) : 0f;
+                    io.github.rwpp.game.GameRoom room = game.getGameRoom();
+                    io.github.rwpp.game.Player me = room == null ? null : room.getLocalPlayer();
+                    int team = me == null ? 0 : me.getTeam();
+                    try {
+                        Class<?> seClass = Class.forName("com.corrodinggames.librocket.scripts.ScriptEngine");
+                        java.lang.reflect.Field seF = seClass.getDeclaredField("scriptEngine");
+                        seF.setAccessible(true);
+                        Object engine = seF.get(null);
+                        if (engine == null) { detail[0] = "ScriptEngine 未初始化"; return; }
+                        Object root = seClass.getMethod("getRoot").invoke(engine);
+                        Class<?> debugClass = Class.forName("com.corrodinggames.librocket.scripts.Debug");
+                        java.lang.reflect.Constructor<?> dbgCtor = debugClass.getDeclaredConstructor(Class.forName("com.corrodinggames.librocket.scripts.Root"));
+                        dbgCtor.setAccessible(true);
+                        Object dbg = dbgCtor.newInstance(root);
+                        Object ok = debugClass.getMethod("moveAllUnitsOnTeam", int.class, float.class, float.class)
+                                .invoke(dbg, team, mx, my);
+                        detail[0] = "moveAllUnitsOnTeam(" + team + "," + mx + "," + my + ") 返回 " + ok
+                                + "（全队移动，含刚造出来的）";
+                    } catch (Throwable t) {
+                        detail[0] = "moveall 失败：" + t;
                     }
                 } else if ("mission".equals(action)) {
                     String needle = value == null ? "" : value.toLowerCase();

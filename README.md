@@ -27,7 +27,8 @@ AI 客户端 ── MCP(stdio) ──> server.mjs ──HTTP──> 游戏内探
 - **面板坐标是硬编码的经验值**（行距 53、纵向偏移 92、左右列 1380/1484）。不同面板的行数不同，坐标不能复用；每次都得用 `rw_panel_map` 现算。
 - **合成点击依赖窗口在前台**。游戏失焦或 ESC 菜单打开时画面会冻结，点击全部无效——这不是 bug，是游戏自己的行为。
 - **后期关卡完全没有验证。** 第一关没有防空压力、没有多兵种配合；第二关之后会遇到空中单位，纯坦克流会被打穿。多工厂并行生产也只在理论层面成立，没实测。
-- **`/act?do=use` 是空实现**，面板动作只能在 UI 上点。
+- **`/act?do=use` 是空实现**——动作对象背后的 handler 字节码就是 `return;`，这条路游戏里根本没实现，别再试。
+- **原生建造/排产（`build2` / `enqueue` / `moveall`）是 2026-11-03 新增的半成品**：方法签名已用 `javap` 对本地 `game-lib.jar` 逐条核对、编译通过，但**游戏内验证没做完**。只有 `rw_buildmenu`（菜单枚举）是实测通的。别把未验证的接口当生产手段。
 
 换句话说：**能演示，能打通第一关，但离"可靠"还远**。想拿它打完整战役，需要大量人工兜底。上面这些限制在 [作战档案/](作战档案/README.md) 里有逐条复盘。
 
@@ -68,16 +69,17 @@ node tools/mcp-smoke.mjs    # initialize + tools/list + 一次调用
 node tools/mcp-test.mjs     # 顺带验证 rw_playbook / rw_panel_map
 ```
 
-## 工具（14 个）
+## 工具（15 个）
 
 | 工具 | 读/写 | 作用 |
 | --- | --- | --- |
 | `rw_probe_ping` | 读 | 探针是否在线（构建号、运行时长） |
 | `rw_state` | 读 | 战局快照：经济/生产/战斗/UI/选中/相机 |
-| `rw_units` | 读 | 单位坐标（`side`=mine/other/all） |
+| `rw_units` | 读 | 单位坐标 + 稳定对象 ID `eh`（`side`=mine/other/all） |
 | `rw_panel` | 读 | 当前选中单位的面板动作（名字 + 说明） |
+| `rw_buildmenu` | 读 | **原生枚举建造菜单**（`index/name/desc/price`），不依赖分辨率 |
 | `rw_missions` | 读 | 战役关卡清单 |
-| `rw_act` | 写 | `move` / `select` / `credits` / `spawn` / `mission` / `startmatch` / `unpause` / `use` |
+| `rw_act` | 写 | `move` / `select` / `credits` / `spawn` / `mission` / `startmatch` / `unpause` / `use` / **`build2`** / **`enqueue`** / **`moveall`** |
 | `rw_panel_map` | 读 | 把面板动作换算成可点击坐标（`index/name/x/y`，附 `click`、`ctrlClick`） |
 | `rw_click` | 写 | 合成点击：`"x,y"` 普通、`"x,y,c"` Ctrl、`"x,y,r"` 右键，分号分隔多项 |
 | `rw_playbook` | 读 | 操作要点；`doc=guide/build/mission1/index` 读对应文档 |
@@ -89,10 +91,12 @@ node tools/mcp-test.mjs     # 顺带验证 rw_playbook / rw_panel_map
 
 ## 探针接口
 
-只读：`/ping` `/state` `/units` `/panel` `/missions` `/records` `/tail`
-写：`/act?do=move|select|credits|spawn|mission|startmatch|unpause|use`
+只读：`/ping` `/state` `/units` `/panel` `/missions` `/buildmenu` `/records` `/tail`
+写：`/act?do=move|select|credits|spawn|mission|startmatch|unpause|use|build2|enqueue|moveall`
 
-`/act?do=use` 是空实现（面板动作的执行入口还没找到，详见 [UI-MAP.md](UI-MAP.md)）。所以生产只能走合成点击。
+`/act?do=use` 是空实现——动作对象背后的 handler 本身就是 `return;`，这条路没实现。
+生产 / 升级走 `enqueue`（建筑侧 `building.a(entry,false)`），建造走 `build2`（`units.y.a(ctx,type,-1,x,y)`）。
+**这两条 2026-11-03 新增，编译通过但游戏内验证未完成**，详见 [UI-MAP.md](UI-MAP.md) 第七节。
 
 ## 已知限制
 
@@ -112,6 +116,12 @@ node tools/mcp-test.mjs     # 顺带验证 rw_playbook / rw_panel_map
 | [UI-MAP.md](UI-MAP.md) | UI 功能 → 底层调用对照，含卡点 |
 | [鼠标脚本化调查.md](鼠标脚本化调查.md) | 合成鼠标点击为什么进不去、试过的所有路子 |
 | [作战档案/](作战档案/README.md) | 实战复盘：首战、建造流程推导、战役第一关通关 |
+
+## 逆向依据
+
+游戏本体是混淆 Jar（类名可读、方法字段 1~2 字母）。本项目的接口签名全部**对着本机 `game-lib.jar` 用 `javap` 核对**，不靠猜名字。
+
+2026-11-03 吸收了另一位逆向者在 Steam 版上的成果（原生建造配方、建筑侧排产入口、空壳方法清单、`units.av` 命令枚举、`eh` 稳定对象 ID），签名逐条复核通过后写进 [UI-MAP.md](UI-MAP.md) 第七节。混淆映射在同一套（RWPP 与 Steam 版同 `game-lib.jar`），但这些结论来自对方实测，我们这边只验证到菜单枚举。
 
 ## 许可证
 
